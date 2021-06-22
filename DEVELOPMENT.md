@@ -1,23 +1,22 @@
 # 项目手册
 
-# 部署运行
+# bot 部署运行
 
 ## docker-compose
 
 * 参见 [这里](https://github.com/tgbot-collection/BotsRunner)
 * 本目录下的 `docker-compose.yml` 也可以作为参考
 * nginx reverse proxy可以[参考这里](https://github.com/BennyThink/WebsiteRunner)
-* [参考这里获取数据库](web/README.md)
+* [参考这里获取数据库](yyetsweb/README.md)
 
 ```shell
 # 启动数据库
 docker-compose up -d mongo
 # 导入数据库
-docker cp db.tgz 1234da:/tmp
+docker yyets_mongo.gz 1234da:/tmp
 # 进入容器
 docker-compose exec mongo bash
-tar xf db.tgz
-mongorestore
+mongorestore --gzip --archive=/tmp/yyets_mongo.gz
 exit
 # 开启服务
 docker-compose up -d
@@ -55,8 +54,6 @@ pip install -r requirements.txt
 python3 web/prepare/convert_db.py
 ```
 
-**不再兼容旧版本数据**
-
 ### 4. 运行
 
 ```bash
@@ -67,49 +64,24 @@ python /path/to/YYeTsBot/yyetsbot/bot.py
 
 参考 `yyets.service`
 
-### 6. 网站部署运行方式
+# 网站部署运行方式
 
-参考 `worker`和`web`目录下的 `README`。需要注意，cf worker已经停止开发。
+参考 `yyetsweb`目录下的 `README`
 
-
-## 添加新的资源网站
+# 添加新的资源网站
 
 欢迎各位开发提交新的资源网站！方法非常简单，重写 `BaseFansub`，实现`search_preview`和`search_result`，按照约定的格式返回数据。
 
 然后把类名字添加到 `FANSUB_ORDER` 就可以了！是不是很简单！
 
-## bot无响应
 
-有时不知为何遇到了bot卡死，无任何反馈。😂~~这个时候需要client api了~~😂
+# 防爬
 
-原因找到了，是因为有时爬虫会花费比较长的时间，然后pytelegrambotapi默认只有两个线程，那么后续的操作就会被阻塞住。
-
-临时的解决办法是增加线程数量，长期的解决办法是使用celery分发任务。
-
-# 网站开发手册
-
-## 接口列表
-* `/api/resource?id=3` GET 获取id=3的资源
-* `/api/resource?kw=逃避` GET 搜索关键词
-* `/api/top` GET 获取大家都在看
-* `/api/name` GET 所有剧集名字
-* `/api/name?human=1` GET 人类可读的方式获取所有剧集名字
-* `/api/metrics` GET 获取网站访问量
-* `/api/user` POST登录，PATCH添加/取消收藏
-* `/api/grafana` grafana相关接口
-* `/api/blacklist` 黑名单信息
-
-## 防爬
-
-### 1. referer
+## 1. referer
 
 网站使用referer验证请求
 
-### 2. 加密headers
-
-使用headers `ne1` 进行加密验证，详细信息可以[参考这里](https://t.me/mikuri520/726)
-
-### 3. rate limit
+## 2. rate limit
 
 404的访问会被计数，超过10次会被拉入黑名单，持续3600秒，再次访问会持续叠加。
 
@@ -131,3 +103,6 @@ python /path/to/YYeTsBot/yyetsbot/bot.py
 * [网站实时数据，MongoDB](https://yyets.dmesg.app/data/yyets_mongo.gz)
 * [MySQL](https://yyets.dmesg.app/data/yyets_mysql.zip)
 * [SQLite](https://yyets.dmesg.app/data/yyets_sqlite.zip)
+
+# API 文档
+参考 [API.md](API.md)
