@@ -7,20 +7,24 @@
 
 __author__ = "Benny <benny.think@gmail.com>"
 
-import os
 import logging
+import os
 import platform
 
 import pytz
-
 from apscheduler.schedulers.background import BackgroundScheduler
+from tornado import httpserver, ioloop, options, web
 from tornado.log import enable_pretty_logging
-from tornado import web, httpserver, ioloop, options
 
-from Mongo import OtherResource
-from handler import IndexHandler, UserHandler, ResourceHandler, TopHandler, UserLikeHandler, NameHandler, \
-    CommentHandler, AnnouncementHandler, CaptchaHandler, MetricsHandler, GrafanaIndexHandler, GrafanaSearchHandler, \
-    GrafanaQueryHandler, BlacklistHandler, NotFoundHandler, DBDumpHandler
+from handler import (AnnouncementHandler, BlacklistHandler, CaptchaHandler,
+                     CommentChildHandler, CommentHandler, CommentNewestHandler,
+                     DBDumpHandler, DoubanHandler, DoubanReportHandler,
+                     GrafanaIndexHandler, GrafanaQueryHandler,
+                     GrafanaSearchHandler, IndexHandler, MetricsHandler,
+                     NameHandler, NotFoundHandler, ResourceHandler, TopHandler,
+                     UserHandler, UserLikeHandler)
+from migration.douban_sync import sync_douban
+from Mongo import OtherMongoResource
 
 enable_pretty_logging()
 
@@ -38,6 +42,8 @@ class RunServer:
         (r'/api/user', UserHandler),
         (r'/api/name', NameHandler),
         (r'/api/comment', CommentHandler),
+        (r'/api/comment/child', CommentChildHandler),
+        (r'/api/comment/newest', CommentNewestHandler),
         (r'/api/captcha', CaptchaHandler),
         (r'/api/metrics', MetricsHandler),
         (r'/api/grafana/', GrafanaIndexHandler),
@@ -47,7 +53,10 @@ class RunServer:
         (r'/api/db_dump', DBDumpHandler),
         (r'/api/announcement', AnnouncementHandler),
         (r'/', IndexHandler),
-        (r'/(.*\.html|.*\.js|.*\.css|.*\.png|.*\.jpg|.*\.ico|.*\.gif|.*\.woff2|.*\.gz|.*\.zip|.*\.svg|.*\.json)',
+        (r'/api/douban', DoubanHandler),
+        (r'/api/douban/report', DoubanReportHandler),
+        (r'/(.*\.html|.*\.js|.*\.css|.*\.png|.*\.jpg|.*\.ico|.*\.gif|.*\.woff2|.*\.gz|.*\.zip|'
+         r'.*\.svg|.*\.json|.*\.txt)',
          web.StaticFileHandler,
          {'path': static_path}),
     ]
@@ -78,7 +87,8 @@ class RunServer:
 if __name__ == "__main__":
     timez = pytz.timezone('Asia/Shanghai')
     scheduler = BackgroundScheduler(timezone=timez)
-    scheduler.add_job(OtherResource().reset_top, 'cron', hour=0, minute=0, day=1)
+    scheduler.add_job(OtherMongoResource().reset_top, 'cron', hour=0, minute=0, day=1)
+    scheduler.add_job(sync_douban, 'cron', hour=0, minute=0, day=1)
     scheduler.start()
     options.define("p", default=8888, help="running port", type=int)
     options.define("h", default='127.0.0.1', help="listen address", type=str)

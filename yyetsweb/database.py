@@ -7,16 +7,17 @@
 
 __author__ = "Benny <benny.think@gmail.com>"
 
+import base64
 import json
 import logging
+import os
 import random
 import re
-import os
 import string
-import base64
+import sys
 
-import redis
 import fakeredis
+import redis
 from captcha.image import ImageCaptcha
 
 predefined_str = re.sub(r"[1l0oOI]", "", string.ascii_letters + string.digits)
@@ -24,10 +25,11 @@ predefined_str = re.sub(r"[1l0oOI]", "", string.ascii_letters + string.digits)
 
 class Redis:
     def __init__(self):
-        if os.getenv("DISABLE_REDIS"):
+        if getattr(sys, '_MEIPASS', None):
+            logging.info("%s Disable redis for standalone exe! %s", "#" * 10, "#" * 10)
             self.r = fakeredis.FakeStrictRedis()
         else:
-            self.r = redis.StrictRedis(host="redis", decode_responses=True, db=2)
+            self.r = redis.StrictRedis(host=os.getenv("redis") or "localhost", decode_responses=True)
 
     def __del__(self):
         self.r.close()
@@ -152,7 +154,20 @@ class CommentResource:
                     username: str, browser: str, comment_id=None) -> dict:
         pass
 
-    def delete_comment(self, comment_id:str):
+    def delete_comment(self, comment_id: str):
+        pass
+
+    def react_comment(self, username, comment_id, verb):
+        pass
+
+
+class CommentChildResource:
+    def get_comment(self, parent_id: str, page: int, size: int) -> dict:
+        pass
+
+
+class CommentNewestResource:
+    def get_comment(self, page: int, size: int) -> dict:
         pass
 
 
@@ -208,4 +223,22 @@ class AnnouncementResource:
         pass
 
     def add_announcement(self, username, content, ip, browser):
+        pass
+
+
+class DoubanResource:
+
+    def get_douban_data(self, rid: int) -> dict:
+        pass
+
+    def get_douban_image(self, rid: int) -> bytes:
+        pass
+
+
+class DoubanReportResource:
+
+    def report_error(self, captcha: str, captcha_id: int, content: str, resource_id: int) -> dict:
+        pass
+
+    def get_error(self) -> dict:
         pass

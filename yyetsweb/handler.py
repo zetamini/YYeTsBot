@@ -7,27 +7,31 @@
 
 __author__ = "Benny <benny.think@gmail.com>"
 
+import importlib
 import json
 import logging
 import os
 import re
+import sys
 import time
-import importlib
-
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
 from hashlib import sha1
 from http import HTTPStatus
 
+import filetype
+from tornado import escape, gen, web
 from tornado.concurrent import run_on_executor
-from tornado import web, escape, gen
 
-from database import Redis, AntiCrawler, CaptchaResource
+from database import AntiCrawler, CaptchaResource, Redis
 
 escape.json_encode = lambda value: json.dumps(value, ensure_ascii=False)
 logging.basicConfig(level=logging.INFO)
 
-adapter = os.getenv("adapter") or "Mongo"
+if getattr(sys, '_MEIPASS', None):
+    adapter = "SQLite"
+else:
+    adapter = "Mongo"
 
 logging.info("%s Running with %s. %s", "#" * 10, adapter, "#" * 10)
 
@@ -117,6 +121,7 @@ class UserHandler(BaseHandler):
             self.set_login(username)
             returned_value = ""
         else:
+            self.set_status(HTTPStatus.FORBIDDEN)
             returned_value = response["message"]
 
         return returned_value
@@ -308,6 +313,16 @@ class CommentHandler(BaseHandler):
             self.set_status(HTTPStatus.UNAUTHORIZED)
             return {"count": 0, "message": "You're unauthorized to delete comment."}
 
+    @run_on_executor()
+    def comment_reaction(self):
+        payload = json.loads(self.request.body)
+        username = self.get_current_user()
+        comment_id = payload["comment_id"]
+        verb = payload["verb"]
+        result = self.instance.react_comment(username, comment_id, verb)
+        self.set_status(result.get("status_code") or HTTPStatus.IM_A_TEAPOT)
+        return result
+
     @gen.coroutine
     def get(self):
         resp = yield self.get_comment()
@@ -323,6 +338,58 @@ class CommentHandler(BaseHandler):
     @web.authenticated
     def delete(self):
         resp = yield self.delete_comment()
+        self.write(resp)
+
+    @gen.coroutine
+    @web.authenticated
+    def patch(self):
+        resp = yield self.comment_reaction()
+        self.write(resp)
+
+
+class CommentChildHandler(CommentHandler):
+    class_name = f"CommentChild{adapter}Resource"
+
+    # from Mongo import CommentChildResource
+    # instance = CommentChildResource()
+
+    @run_on_executor()
+    def get_comment(self):
+        parent_id = self.get_argument("parent_id", "0")
+        size = int(self.get_argument("size", "5"))
+        page = int(self.get_argument("page", "1"))
+
+        if not parent_id:
+            self.set_status(HTTPStatus.BAD_REQUEST)
+            return {"status": False, "message": "请提供 parent_id"}
+        comment_data = self.instance.get_comment(parent_id, page, size)
+        self.hide_phone((comment_data["data"]))
+        return comment_data
+
+    @gen.coroutine
+    def get(self):
+        resp = yield self.get_comment()
+        self.write(resp)
+
+
+class CommentNewestHandler(CommentHandler):
+    class_name = f"CommentNewest{adapter}Resource"
+
+    # from Mongo import CommentNewestResource
+    # instance = CommentNewestResource()
+
+    @run_on_executor()
+    def get_comment(self):
+        size = int(self.get_argument("size", "5"))
+        page = int(self.get_argument("page", "1"))
+
+        comment_data = self.instance.get_comment(page, size)
+        self.hide_phone((comment_data["data"]))
+        return comment_data
+
+    @gen.coroutine
+    def get(self):
+        resp = yield self.get_comment()
         self.write(resp)
 
 
@@ -369,6 +436,20 @@ class AnnouncementHandler(BaseHandler):
 class CaptchaHandler(BaseHandler, CaptchaResource):
 
     @run_on_executor()
+    def verify_captcha(self):
+        data = json.loads(self.request.body)
+        captcha_id = data.get("id", None)
+        userinput = data.get("captcha", None)
+        if captcha_id is None or userinput is None:
+            self.set_status(HTTPStatus.BAD_REQUEST)
+            return "Please supply id or captcha parameter."
+        returned = self.verify_code(userinput, captcha_id)
+        status_code = returned.get("status")
+        if not status_code:
+            self.set_status(HTTPStatus.FORBIDDEN)
+        return returned
+
+    @run_on_executor()
     def captcha(self):
         request_id = self.get_argument("id", None)
         if request_id is None:
@@ -380,6 +461,11 @@ class CaptchaHandler(BaseHandler, CaptchaResource):
     @gen.coroutine
     def get(self):
         resp = yield self.captcha()
+        self.write(resp)
+
+    @gen.coroutine
+    def post(self):
+        resp = yield self.verify_captcha()
         self.write(resp)
 
 
@@ -400,6 +486,10 @@ class MetricsHandler(BaseHandler):
 
     @run_on_executor()
     def get_metrics(self):
+        if not self.instance.is_admin(self.get_current_user()):
+            self.set_status(HTTPStatus.NOT_FOUND)
+            return ""
+
         # only return latest 7 days. with days parameter to generate different range
         from_date = self.get_query_argument("from", None)
         to_date = self.get_query_argument("to", None)
@@ -430,7 +520,8 @@ class GrafanaIndexHandler(BaseHandler):
 class GrafanaSearchHandler(BaseHandler):
 
     def post(self):
-        data = ["access", "search", "resource"]
+        data = ["resource", "top", "home", "search", "extra", "discuss", "multiDownload", "download", "user", "share",
+                "me", "database", "help", "backOld", "favorite", "unFavorite", "comment"]
         self.write(json.dumps(data))
 
 
@@ -468,8 +559,9 @@ class GrafanaQueryHandler(BaseHandler):
         for target in targets:
             data_points = []
             result = self.instance.get_grafana_data(date_series)
+            i: dict
             for i in result:
-                datum = [i[target], self.time_str_int(i["date"]) * 1000]
+                datum = [i[target], self.time_str_int(i["date"]) * 1000] if i.get(target) else []
                 data_points.append(datum)
             temp = {
                 "target": target,
@@ -558,4 +650,66 @@ class DBDumpHandler(BaseHandler):
     @gen.coroutine
     def get(self):
         resp = yield self.get_hash()
+        self.write(resp)
+
+
+class DoubanHandler(BaseHandler):
+    class_name = f"Douban{adapter}Resource"
+
+    # from Mongo import DoubanMongoResource
+    # instance = DoubanMongoResource()
+
+    @run_on_executor()
+    def douban_data(self):
+        rid = self.get_query_argument("resource_id")
+        data = self.instance.get_douban_data(int(rid))
+        data.pop("posterData")
+        return data
+
+    def get_image(self) -> bytes:
+        rid = self.get_query_argument("resource_id")
+        return self.instance.get_douban_image(int(rid))
+
+    @gen.coroutine
+    def get(self):
+        _type = self.get_query_argument("type", None)
+        if _type == "image":
+            data = self.get_image()
+            self.set_header("content-type", filetype.guess_mime(data))
+            self.write(data)
+        else:
+            resp = yield self.douban_data()
+            self.write(resp)
+
+
+class DoubanReportHandler(BaseHandler):
+    class_name = f"DoubanReport{adapter}Resource"
+
+    # from Mongo import DoubanReportMongoResource
+    # instance = DoubanReportMongoResource()
+
+    @run_on_executor()
+    def get_error(self):
+        return self.instance.get_error()
+
+    @run_on_executor()
+    def report_error(self):
+        data = json.loads(self.request.body)
+        user_captcha = data["captcha_id"]
+        captcha_id = data["id"]
+        content = data["content"]
+        resource_id = data["resource_id"]
+        returned = self.instance.report_error(user_captcha, captcha_id, content, resource_id)
+        status_code = returned.get("status_code", HTTPStatus.CREATED)
+        self.set_status(status_code)
+        return self.instance.report_error(user_captcha, captcha_id, content, resource_id)
+
+    @gen.coroutine
+    def post(self):
+        resp = yield self.report_error()
+        self.write(resp)
+
+    @gen.coroutine
+    def get(self):
+        resp = yield self.get_error()
         self.write(resp)

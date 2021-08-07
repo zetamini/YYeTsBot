@@ -7,24 +7,39 @@
 
 __author__ = "Benny <benny.think@gmail.com>"
 
-import uuid
+import contextlib
+import logging
+import os
+import pathlib
+import re
+import sys
+import time
+from datetime import date, timedelta
+from http import HTTPStatus
+from urllib.parse import unquote
 
 import pymongo
-import os
-import time
-from http import HTTPStatus
-from datetime import timedelta, date, datetime
-from bson.objectid import ObjectId
-
 import requests
+from bs4 import BeautifulSoup
+from bson.objectid import ObjectId
 from passlib.handlers.pbkdf2 import pbkdf2_sha256
+from retry import retry
 
-from database import (AnnouncementResource, BlacklistResource, CommentResource, ResourceResource,
-                      GrafanaQueryResource, MetricsResource, NameResource, OtherResource,
-                      TopResource, UserLikeResource, UserResource, CaptchaResource)
+from database import (AnnouncementResource, BlacklistResource, CaptchaResource,
+                      CommentChildResource, CommentNewestResource,
+                      CommentResource, DoubanReportResource, DoubanResource,
+                      GrafanaQueryResource, MetricsResource, NameResource,
+                      OtherResource, Redis, ResourceResource, TopResource,
+                      UserLikeResource, UserResource)
 from utils import ts_date
 
+lib_path = pathlib.Path(__file__).parent.parent.joinpath("yyetsbot").resolve().as_posix()
+sys.path.append(lib_path)
+from fansub import BD2020, XL720, NewzmzOnline, ZhuixinfanOnline, ZimuxiaOnline
+
 mongo_host = os.getenv("mongo") or "localhost"
+DOUBAN_SEARCH = "https://www.douban.com/search?cat=1002&q={}"
+DOUBAN_DETAIL = "https://movie.douban.com/subject/{}/"
 
 
 class Mongo:
@@ -71,11 +86,14 @@ class AnnouncementMongoResource(AnnouncementResource, Mongo):
     def get_announcement(self, page: int, size: int) -> dict:
         condition = {}
         count = self.db["announcement"].count_documents(condition)
-        data = self.db["announcement"].find(condition, projection={"_id": False, "ip": False}) \
+        data = self.db["announcement"].find(condition, projection={"_id": True, "ip": False}) \
             .sort("_id", pymongo.DESCENDING).limit(size).skip((page - 1) * size)
-
+        data = list(data)
+        for i in data:
+            i["id"] = str(i["_id"])
+            i.pop("_id")
         return {
-            "data": list(data),
+            "data": data,
             "count": count,
         }
 
@@ -124,19 +142,30 @@ class CommentMongoResource(CommentResource, Mongo):
         for item in parent_data:
             children_ids = item.get("children", [])
             condition = {"_id": {"$in": children_ids}, "deleted_at": {"$exists": False}, "type": "child"}
+            children_count = self.db["comment"].count_documents(condition)
             children_data = self.db["comment"].find(condition, self.projection) \
                 .sort("_id", pymongo.DESCENDING).limit(self.inner_size).skip((self.inner_page - 1) * self.inner_size)
             children_data = list(children_data)
+            self.get_user_group(children_data)
+
+            item["children"] = []
             if children_data:
-                item["children"] = []
                 item["children"].extend(children_data)
+                item["childrenCount"] = children_count
+            else:
+                item["childrenCount"] = 0
+
+    def get_user_group(self, data):
+        for comment in data:
+            username = comment["username"]
+            user = self.db["users"].find_one({"username": username})
+            group = user.get("group", ["user"])
+            comment["group"] = group
 
     def get_comment(self, resource_id: int, page: int, size: int, **kwargs) -> dict:
         self.inner_page = kwargs.get("inner_page", 1)
         self.inner_size = kwargs.get("inner_size", 5)
         condition = {"resource_id": resource_id, "deleted_at": {"$exists": False}, "type": {"$ne": "child"}}
-        if resource_id == -1:
-            condition.pop("resource_id")
 
         count = self.db["comment"].count_documents(condition)
         data = self.db["comment"].find(condition, self.projection) \
@@ -144,6 +173,7 @@ class CommentMongoResource(CommentResource, Mongo):
         data = list(data)
         self.find_children(data)
         self.convert_objectid(data)
+        self.get_user_group(data)
         return {
             "data": data,
             "count": count,
@@ -154,7 +184,6 @@ class CommentMongoResource(CommentResource, Mongo):
                     ip: str, username: str, browser: str, parent_comment_id=None) -> dict:
         returned = {"status_code": 0, "message": ""}
         verify_result = CaptchaResource().verify_code(captcha, captcha_id)
-        # verify_result["status"] = 1
         if not verify_result["status"]:
             returned["status_code"] = HTTPStatus.BAD_REQUEST
             returned["message"] = verify_result["message"]
@@ -222,6 +251,79 @@ class CommentMongoResource(CommentResource, Mongo):
             returned["count"] = count
 
         return returned
+
+    def react_comment(self, username, comment_id, verb):
+        if verb not in ("like", "dislike"):
+            return {"status": False,
+                    "message": "verb could only be like or dislike",
+                    "status_code": HTTPStatus.BAD_REQUEST}
+
+        result = self.db["users"].find_one({"username": username, f"comments_{verb}": {"$in": [comment_id]}})
+        if result:
+            return {"status": False, "message": "too many reactions", "status_code": HTTPStatus.UNPROCESSABLE_ENTITY}
+
+        if not self.db["comment"].find_one({"_id": ObjectId(comment_id)}):
+            return {"status": False, "message": "Where is your comments?", "status_code": HTTPStatus.NOT_FOUND}
+
+        self.db["users"].update_one({"username": username},
+                                    {"$push": {f"comments_{verb}": comment_id}}
+                                    )
+
+        self.db["comment"].update_one({"_id": ObjectId(comment_id)},
+                                      {"$inc": {verb: 1}}
+                                      )
+
+        return {"status": True, "message": "success",
+                "status_code": HTTPStatus.CREATED}
+
+
+class CommentChildMongoResource(CommentChildResource, CommentMongoResource, Mongo):
+    def __init__(self):
+        super().__init__()
+        self.page = 1
+        self.size = 5
+        self.projection = {"ip": False, "parent_id": False}
+
+    def get_comment(self, parent_id: str, page: int, size: int) -> dict:
+        condition = {"parent_id": ObjectId(parent_id), "deleted_at": {"$exists": False}, "type": "child"}
+
+        count = self.db["comment"].count_documents(condition)
+        data = self.db["comment"].find(condition, self.projection) \
+            .sort("_id", pymongo.DESCENDING).limit(size).skip((page - 1) * size)
+        data = list(data)
+        self.convert_objectid(data)
+        self.get_user_group(data)
+        return {
+            "data": data,
+            "count": count,
+        }
+
+
+class CommentNewestMongoResource(CommentNewestResource, CommentMongoResource, Mongo):
+    def __init__(self):
+        super().__init__()
+        self.page = 1
+        self.size = 5
+        self.projection = {"ip": False, "parent_id": False, "children": False}
+        self.condition = {"deleted_at": {"$exists": False}}
+
+    def get_comment(self, page: int, size: int) -> dict:
+        # ID，时间，用户名，用户组，资源名，资源id
+        condition = {"deleted_at": {"$exists": False}}
+        count = self.db["comment"].count_documents(condition)
+        data = self.db["comment"].find(condition, self.projection) \
+            .sort("_id", pymongo.DESCENDING).limit(size).skip((page - 1) * size)
+        data = list(data)
+        self.convert_objectid(data)
+        self.get_user_group(data)
+        for i in data:
+            resource_id = i.get("resource_id", 233)
+            res = self.db["yyets"].find_one({"data.info.id": resource_id})
+            i["cnname"] = res["data"]["info"]["cnname"]
+        return {
+            "data": data,
+            "count": count,
+        }
 
 
 class GrafanaQueryMongoResource(GrafanaQueryResource, Mongo):
@@ -293,6 +395,17 @@ class NameMongoResource(NameResource, Mongo):
 
 
 class ResourceMongoResource(ResourceResource, Mongo):
+    redis = Redis().r
+
+    def fansub_search(self, class_name: str, kw: str):
+        class_ = globals().get(class_name)
+        result = class_().search_preview(kw)
+        result.pop("class")
+        if result:
+            return list(result.values())
+        else:
+            return []
+
     def get_resource_data(self, resource_id: int, username: str) -> dict:
         data = self.db["yyets"].find_one_and_update(
             {"data.info.id": resource_id},
@@ -320,7 +433,22 @@ class ResourceMongoResource(ResourceResource, Mongo):
             ]},
             projection
         )
-        return dict(data=list(data))
+        data = list(data)
+        returned = {}
+        if data:
+            returned = dict(data=data)
+            returned["extra"] = []
+        else:
+            extra = self.fansub_search(ZimuxiaOnline.__name__, keyword) or \
+                    self.fansub_search(NewzmzOnline.__name__, keyword) or \
+                    self.fansub_search(ZhuixinfanOnline.__name__, keyword) or \
+                    self.fansub_search(XL720.__name__, keyword) or \
+                    self.fansub_search(BD2020.__name__, keyword)
+
+            returned["data"] = []
+            returned["extra"] = extra
+
+        return returned
 
 
 class TopMongoResource(TopResource, Mongo):
@@ -342,7 +470,7 @@ class TopMongoResource(TopResource, Mongo):
         area_dict = dict(ALL={"$regex": ".*"}, US="美国", JP="日本", KR="韩国", UK="英国")
         all_data = {}
         for abbr, area in area_dict.items():
-            data = self.db["yyets"].find({"data.info.area": area}, self.projection). \
+            data = self.db["yyets"].find({"data.info.area": area, "data.info.id": {"$ne": 233}}, self.projection). \
                 sort("data.info.views", pymongo.DESCENDING).limit(15)
             all_data[abbr] = list(data)
 
@@ -412,5 +540,126 @@ class UserMongoResource(UserResource, Mongo):
 
     def update_user_last(self, username: str, now_ip: str) -> None:
         self.db["users"].update_one({"username": username},
-                                    {"$set": {"last_date": (ts_date()), "last_ip": now_ip}}
+                                    {"$set": {"lastDate": (ts_date()), "lastIP": now_ip}}
                                     )
+
+
+class DoubanMongoResource(DoubanResource, Mongo):
+
+    def get_douban_data(self, rid: int) -> dict:
+        with contextlib.suppress(Exception):
+            return self.find_douban(rid)
+        return {"posterData": None}
+
+    def get_douban_image(self, rid: int) -> bytes:
+        db_data = self.get_douban_data(rid)
+        return db_data["posterData"]
+
+    @retry(IndexError, tries=3, delay=5)
+    def find_douban(self, resource_id: int):
+        session = requests.Session()
+        ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/87.0.4280.88 Safari/537.36"
+        session.headers.update({"User-Agent": ua})
+
+        douban_col = self.db["douban"]
+        yyets_col = self.db["yyets"]
+        data = douban_col.find_one({"resourceId": resource_id}, {"_id": False, "raw": False})
+        if data:
+            logging.info("Existing data for %s", resource_id)
+            return data
+
+        # data not found, craw from douban
+        projection = {"data.info.cnname": True, "data.info.enname": True, "data.info.aliasname": True}
+        names = yyets_col.find_one({"data.info.id": resource_id}, projection=projection)
+        if names is None:
+            return {}
+        cname = names["data"]["info"]["cnname"]
+        logging.info("cnname for douban is %s", cname)
+
+        search_html = session.get(DOUBAN_SEARCH.format(cname)).text
+        logging.info("Analysis search html...length %s", len(search_html))
+        soup = BeautifulSoup(search_html, 'html.parser')
+        douban_item = soup.find_all("div", class_="content")
+
+        fwd_link = unquote(douban_item[0].a["href"])
+        douban_id = re.findall(r"https://movie.douban.com/subject/(\d*)/&query=", fwd_link)[0]
+        final_data = self.get_craw_data(cname, douban_id, resource_id, search_html, session)
+        douban_col.insert_one(final_data.copy())
+        final_data.pop("raw")
+        return final_data
+
+    @staticmethod
+    def get_craw_data(cname, douban_id, resource_id, search_html, session):
+        detail_link = DOUBAN_DETAIL.format(douban_id)
+        detail_html = session.get(detail_link).text
+        logging.info("Analysis detail html...%s", detail_link)
+        soup = BeautifulSoup(detail_html, 'html.parser')
+
+        directors = [i.text for i in (soup.find_all("a", rel="v:directedBy"))]
+        release_date = poster_image_link = rating = year_text = intro = writers = episode_count = episode_duration = ""
+        with contextlib.suppress(IndexError):
+            episode_duration = soup.find_all("span", property="v:runtime")[0].text
+        for i in soup.find_all("span", class_="pl"):
+            if i.text == "编剧":
+                writers = re.sub(r"\s", "", list(i.next_siblings)[1].text).split("/")
+            if i.text == "集数:":
+                episode_count = str(i.nextSibling)
+            if i.text == "单集片长:" and not episode_duration:
+                episode_duration = str(i.nextSibling)
+        actors = [i.text for i in soup.find_all("a", rel="v:starring")]
+        genre = [i.text for i in soup.find_all("span", property="v:genre")]
+
+        with contextlib.suppress(IndexError):
+            release_date = soup.find_all("span", property="v:initialReleaseDate")[0].text
+        with contextlib.suppress(IndexError):
+            poster_image_link = soup.find_all("div", id="mainpic")[0].a.img["src"]
+        with contextlib.suppress(IndexError):
+            rating = soup.find_all("strong", class_="ll rating_num")[0].text
+        with contextlib.suppress(IndexError):
+            year_text = re.sub(r"[()]", "", soup.find_all("span", class_="year")[0].text)
+        with contextlib.suppress(IndexError):
+            intro = re.sub(r"\s", "", soup.find_all("span", property="v:summary")[0].text)
+
+        final_data = {
+            "name": cname,
+            "raw": {
+                "search_url": DOUBAN_SEARCH.format(cname),
+                "detail_url": detail_link,
+                "search_html": search_html,
+                "detail_html": detail_html
+            },
+            "doubanId": int(douban_id),
+            "doubanLink": detail_link,
+            "posterLink": poster_image_link,
+            "posterData": session.get(poster_image_link).content,
+            "resourceId": resource_id,
+            "rating": rating,
+            "actors": actors,
+            "directors": directors,
+            "genre": genre,
+            "releaseDate": release_date,
+            "episodeCount": episode_count,
+            "episodeDuration": episode_duration,
+            "writers": writers,
+            "year": year_text,
+            "introduction": intro
+        }
+        return final_data
+
+
+class DoubanReportMongoResource(DoubanReportResource, Mongo):
+    def get_error(self) -> dict:
+        return dict(data=list(self.db["douban_error"].find(projection={"_id": False})))
+
+    def report_error(self, captcha: str, captcha_id: int, content: str, resource_id: int) -> dict:
+        returned = {"status_code": 0, "message": ""}
+        verify_result = CaptchaResource().verify_code(captcha, captcha_id)
+        if not verify_result["status"]:
+            returned["status_code"] = HTTPStatus.BAD_REQUEST
+            returned["message"] = verify_result["message"]
+            return returned
+
+        count = self.db["douban_error"].update_one(
+            {"resource_id": resource_id},
+            {"$push": {"content": content}}, upsert=True).matched_count
+        return dict(count=count)

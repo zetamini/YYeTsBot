@@ -1,4 +1,4 @@
-FROM python:3.9-alpine as pybuilder
+FROM python:3.9-alpine3.13 as pybuilder
 
 RUN apk update && apk add  --no-cache tzdata ca-certificates alpine-sdk libressl-dev libffi-dev cargo && \
     apk add tiff-dev jpeg-dev openjpeg-dev zlib-dev freetype-dev lcms2-dev \
@@ -8,19 +8,22 @@ COPY requirements.txt /requirements.txt
 RUN pip3 install  --user -r /requirements.txt && rm /requirements.txt
 
 
-FROM python:3.9-alpine as runner
+FROM python:3.9-alpine3.13 as runner
 RUN apk update && apk add --no-cache libressl jpeg-dev openjpeg-dev libimagequant-dev tiff-dev freetype-dev libxcb-dev
 
 
 FROM node:alpine as nodebuilder
+ARG env
 WORKDIR /YYeTsBot/YYeTsFE/
 RUN apk add git
 COPY YYeTsFE/package.json /YYeTsBot/YYeTsFE/
 COPY YYeTsFE/yarn.lock /YYeTsBot/YYeTsFE/
-RUN yarn
-COPY . /YYeTsBot/
+RUN yarn --network-timeout 1000000
+COPY YYeTsFE /YYeTsBot/YYeTsFE/
+COPY .git/modules /YYeTsBot/.git/modules/
+COPY hooks/dev_robots.sh /tmp/
 RUN echo "gitdir: ../.git/modules/YYeTsFE" > .git
-RUN yarn run release
+RUN if [ "$env" = "dev" ]; then echo "dev build"; yarn build; sh /tmp/dev_robots.sh; rm /tmp/dev_robots.sh; else echo "prod build"; yarn run release; fi
 
 
 FROM runner

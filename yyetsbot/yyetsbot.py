@@ -5,27 +5,27 @@
 __author__ = 'Benny <benny.think@gmail.com>'
 
 import io
-import time
-import re
-import logging
 import json
+import logging
+import re
 import tempfile
+import time
 from urllib.parse import quote_plus
 
 import telebot
 from apscheduler.schedulers.background import BackgroundScheduler
-from telebot import types, apihelper
+from telebot import apihelper, types
 from tgbot_ping import get_runtime
 
 import fansub
-from utils import (save_error_dump, get_error_dump, reset_request,
-                   today_request, show_usage, redis_announcement
-                   )
-from config import PROXY, TOKEN, YYETS_SEARCH_URL, MAINTAINER, REPORT, FANSUB_ORDER
+from config import (FANSUB_ORDER, MAINTAINER, PROXY, REPORT, TOKEN,
+                    YYETS_SEARCH_URL)
+from utils import (get_error_dump, redis_announcement, reset_request,
+                   save_error_dump, show_usage, today_request)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(filename)s [%(levelname)s]: %(message)s')
 if PROXY:
-    apihelper.proxy = {'http': PROXY}
+    apihelper.proxy = {'https': PROXY}
 
 bot = telebot.TeleBot(TOKEN, num_threads=100)
 angry_count = 0
@@ -35,8 +35,7 @@ angry_count = 0
 def send_welcome(message):
     bot.send_chat_action(message.chat.id, 'typing')
     bot.send_message(message.chat.id, '欢迎使用，直接发送想要的剧集标题给我就可以了，不需要其他关键字，我会帮你搜索。\n\n'
-                                      '人人影视专注于欧美日韩剧集，请不要反馈“我搜不到喜羊羊与灰太狼/流浪地球”这种问题，'
-                                      '我会生气的😠😡🤬😒\n\n'
+                                      '别说了，现在连流浪地球都搜得到了。本小可爱再也不生气了😄，'
                                       f'目前搜索优先级 {FANSUB_ORDER}\n '
                                       f'另外，可以尝试使用一下 https://yyets.dmesg.app/ 哦！',
                      parse_mode='html', disable_web_page_preview=True)
@@ -127,13 +126,11 @@ for sub_name in dir(fansub):
             tv_name: str = re.findall(r"/.*line\s*(\S*)", message.text)[0]
             class_name: str = re.findall(r"/(.*line)", message.text)[0]
             class_ = getattr(fansub, class_name)
-            if class_name not in ("zimuxia_online", "yyets_offline"):
-                bot.send_message(message.chat.id, f"{class_.label}: under dev")
-                return
 
             if not tv_name:
-                bot.send_message(message.chat.id, f"{class_.label}: 请附加你要搜索的剧集名称，如 `/{class_name} 逃避可耻`",
+                bot.send_message(message.chat.id, f"{class_.__name__}: 请附加你要搜索的剧集名称，如 `/{class_name} 逃避可耻`",
                                  parse_mode='markdown')
+                return
 
             else:
                 setattr(message, "text", tv_name)
@@ -211,11 +208,10 @@ def base_send_search(message, instance=None):
 
     markup = types.InlineKeyboardMarkup()
 
-    source = result.get("source")
-    result.pop("source")
-    for url, detail in result.items():
-        # we don't need to save which fansub class we used here, because we saved an url and that's good enough.
-        btn = types.InlineKeyboardButton(detail, callback_data="choose%s" % url)
+    source = result.get("class")
+    result.pop("class")
+    for url_hash, detail in result.items():
+        btn = types.InlineKeyboardButton(detail["name"], callback_data="choose%s" % url_hash)
         markup.add(btn)
 
     if result:
@@ -262,7 +258,7 @@ def magic_recycle(fan, call, url_hash):
 def choose_link(call):
     fan = fansub.FansubEntrance()
     bot.send_chat_action(call.message.chat.id, 'typing')
-    # call.data is url, with sha1, http://www.rrys2020.com/resource/36588
+    # call.data is url_hash, with sha1, http://www.rrys2020.com/resource/36588
     resource_url_hash = re.findall(r"choose(\S*)", call.data)[0]
     if magic_recycle(fan, call, resource_url_hash):
         return

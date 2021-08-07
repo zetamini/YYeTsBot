@@ -17,24 +17,39 @@ SHARE_URL = "http://www.rrys2020.com/resource/ushare"
 SHARE_WEB = "http://got002.com/resource.html?code={code}"
 # http://got002.com/api/v1/static/resource/detail?code=9YxN91
 SHARE_API = "http://got002.com/api/v1/static/resource/detail?code={code}"
-# fix
+
+# fix zimuxia
 FIX_RESOURCE = "https://www.zimuxia.cn/portfolio/{name}"
 FIX_SEARCH = "https://www.zimuxia.cn/?s={kw}"
-# cloudflare worker
+
+# zhuixinfan
+ZHUIXINFAN_SEARCH = "http://www.fanxinzhui.com/list?k={}"
+ZHUIXINFAN_RESOURCE = "http://www.fanxinzhui.com{}"
+# yyets website
 WORKERS = "https://yyets.dmesg.app/resource.html?id={id}"
 
+# new zmz
+NEWZMZ_SEARCH = "https://newzmz.com/subres/index/getres.html?keyword={}"
+NEWZMZ_RESOURCE = "https://ysfx.tv/view/{}"
+
+# BD2020
+BD2020_SEARCH = "https://www.bd2020.com/search.jspx?q={}"
+
+# XL720
+XL720_SEARCH = "https://www.xl720.com/?s={}"
+
 # authentication config
-TOKEN = os.environ.get("TOKEN") or "TOKEN"
-USERNAME = os.environ.get("USERNAME") or "USERNAME"
-PASSWORD = os.environ.get("PASSWORD") or "password"
+TOKEN = os.getenv("TOKEN") or "TOKEN"
+USERNAME = os.getenv("USERNAME") or "USERNAME"
+PASSWORD = os.getenv("PASSWORD") or "password"
 
 # network and server config
-PROXY = os.environ.get("PROXY")
-REDIS = os.environ.get("REDIS") or "redis"
-MONGO = os.environ.get("MONGO") or "mongo"
+PROXY = os.getenv("PROXY")
+REDIS = os.getenv("REDIS") or "redis"
+MONGO = os.getenv("MONGO") or "mongo"
 
 # other
-MAINTAINER = os.environ.get("MAINTAINER")
-REPORT = os.environ.get("REPORT") or False
-# This name must match class name, other wise this bot won't functional.
-FANSUB_ORDER: str = os.environ.get("ORDER") or 'YYeTsOffline,ZimuxiaOnline'
+MAINTAINER = os.getenv("MAINTAINER")
+REPORT = os.getenv("REPORT") or False
+# This name must match class name, other wise this bot won't running.
+FANSUB_ORDER: str = os.getenv("ORDER") or 'YYeTsOffline,ZimuxiaOnline,NewzmzOnline,ZhuixinfanOnline,XL720,BD2020'
